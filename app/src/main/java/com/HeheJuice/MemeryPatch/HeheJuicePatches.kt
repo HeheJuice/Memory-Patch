@@ -214,8 +214,8 @@ class HeheJuiceSpoof : IXposedHookLoadPackage {
         // =========================================================
         // LAYER 3: com.samsung.android.app.memory 振动兼容修复
         // 崩溃: NoSuchMethodError VibrationEffect.semCreateWaveform(IIF)
-        // 方案: 仅在系统缺该方法时, Hook ScreenCaptureViewerActivity.b0,
-        //       按返回类型安全跳过, 其余场景零干预
+        // 方案: 系统缺该方法时, hookAllMethods("b0") 全部重载,
+        //       在回调里按 returnType 运行时分流跳过方法体
         // =========================================================
         if (lpparam.packageName == "com.samsung.android.app.memory") {
             installMemoryVibrationFix(lpparam)
@@ -227,43 +227,60 @@ class HeheJuiceSpoof : IXposedHookLoadPackage {
     // -----------------------------------------------------------------
     private fun installMemoryVibrationFix(lpparam: LoadPackageParam) {
         val tag = "HeheJuice"
+
+        // 0) 先确认模块确实加载进了目标进程
+        XposedBridge.log("$tag: handleLoadPackage for ${lpparam.packageName}, starting vibration fix")
+
         try {
-            // 1) 先检测系统是否真的缺方法; 不缺就不干预
+            // 1) 探测系统是否真的缺 (IIF) 重载; 不缺就不干预
             if (systemHasSemCreateWaveform()) {
                 XposedBridge.log("$tag: semCreateWaveform(IIF) exists, no patch needed")
                 return
             }
-            XposedBridge.log("$tag: semCreateWaveform(IIF) missing, patching ScreenCaptureViewerActivity.b0")
+            XposedBridge.log("$tag: semCreateWaveform(IIF) MISSING -> installing b0 hook")
 
             val cls = XposedHelpers.findClass(
                 "com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity",
                 lpparam.classLoader
             )
+            XposedBridge.log("$tag: target class loaded: ${cls.name}")
 
             var hooked = 0
-            for (m in cls.declaredMethods) {
-                if (m.name != "b0") continue
-                val ret = m.returnType
-                // 只处理可能是"构造振动效果"的重载: 返回 VibrationEffect 或 void
-                if (ret != VibrationEffect::class.java && ret != java.lang.Void.TYPE) continue
+            val hook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val ret = param.method.returnType
+                    XposedBridge.log(
+                        "$tag: b0 intercepted -> ${param.method.toGenericString()}, args=${param.args?.joinToString()}"
+                    )
+                    param.result = safeValueFor(ret)
+                }
+            }
 
-                XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (ret == VibrationEffect::class.java) {
-                            param.result = safeClickEffect()
-                        } else {
-                            param.result = null
-                        }
+            // 2) 无条件 hook 所有名为 b0 的方法(不论参数/返回类型)
+            XposedBridge.hookAllMethods(cls, "b0", hook)
+            hooked = cls.declaredMethods.count { it.name == "b0" }
+            XposedBridge.log("$tag: hooked b0 overloads = $hooked")
+
+            if (hooked == 0) {
+                // 兜底: b0 若声明在父类, 往上找一层
+                var p = cls.superclass
+                while (p != null && p != Any::class.java) {
+                    if (p.declaredMethods.any { it.name == "b0" }) {
+                        XposedBridge.hookAllMethods(p, "b0", hook)
+                        XposedBridge.log("$tag: hooked b0 on superclass ${p.name}")
+                        hooked = 1
+                        break
                     }
-                })
-                hooked++
-                XposedBridge.log("$tag: hooked b0 -> ${m.toGenericString()}")
+                    p = p.superclass
+                }
             }
             if (hooked == 0) {
-                XposedBridge.log("$tag: no b0 overload matched, patch NOT applied")
+                XposedBridge.log("$tag: WARN no b0 method found anywhere in hierarchy")
             }
         } catch (t: Throwable) {
-            XposedBridge.log("$tag: installMemoryVibrationFix error: $t")
+            // 关键: 不再吞异常, 完整打到日志, 方便定位
+            XposedBridge.log("$tag: installMemoryVibrationFix FAILED: $t")
+            XposedBridge.log(t)
         }
     }
 
@@ -281,6 +298,32 @@ class HeheJuiceSpoof : IXposedHookLoadPackage {
             false
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    /**
+     * 根据目标方法的返回类型给出安全返回值。
+     * - VibrationEffect 或子类 -> safeClickEffect()
+     * - void                  -> null
+     * - 原始类型              -> 对应零值 (Xposed 对原始类型不接受 null)
+     * - 其他引用类型          -> null
+     */
+    private fun safeValueFor(ret: Class<*>): Any? {
+        return when {
+            ret == java.lang.Void.TYPE -> null
+            VibrationEffect::class.java.isAssignableFrom(ret) -> safeClickEffect()
+            ret.isPrimitive -> when (ret) {
+                java.lang.Integer.TYPE -> 0
+                java.lang.Long.TYPE -> 0L
+                java.lang.Boolean.TYPE -> false
+                java.lang.Float.TYPE -> 0f
+                java.lang.Double.TYPE -> 0.0
+                java.lang.Byte.TYPE -> 0.toByte()
+                java.lang.Short.TYPE -> 0.toShort()
+                java.lang.Character.TYPE -> '\u0000'
+                else -> null
+            }
+            else -> null
         }
     }
 
