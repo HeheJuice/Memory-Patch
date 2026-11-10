@@ -248,9 +248,10 @@ class HeheJuiceSpoof : IXposedHookLoadPackage {
             var hooked = 0
             val hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    val ret = param.method.returnType
+                    val m = param.method as? java.lang.reflect.Method
+                    val ret = m?.returnType
                     XposedBridge.log(
-                        "$tag: b0 intercepted -> ${param.method.toGenericString()}, args=${param.args?.joinToString()}"
+                        "$tag: b0 intercepted -> ${m?.toGenericString() ?: param.method.name}, args=${param.args?.joinToString()}"
                     )
                     param.result = safeValueFor(ret)
                 }
@@ -303,12 +304,10 @@ class HeheJuiceSpoof : IXposedHookLoadPackage {
 
     /**
      * 根据目标方法的返回类型给出安全返回值。
-     * - VibrationEffect 或子类 -> safeClickEffect()
-     * - void                  -> null
-     * - 原始类型              -> 对应零值 (Xposed 对原始类型不接受 null)
-     * - 其他引用类型          -> null
+     * ret == null 时(cast 失败)直接返回 null, 安全跳过方法体。
      */
-    private fun safeValueFor(ret: Class<*>): Any? {
+    private fun safeValueFor(ret: Class<*>?): Any? {
+        if (ret == null) return null
         return when {
             ret == java.lang.Void.TYPE -> null
             VibrationEffect::class.java.isAssignableFrom(ret) -> safeClickEffect()
