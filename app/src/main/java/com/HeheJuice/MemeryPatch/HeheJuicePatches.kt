@@ -11,7 +11,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 
-class HeheJuiceSpoof : IXposedHookLoadPackage {
+class HeheJuicePatches : IXposedHookLoadPackage {
 
     private val customXmlContent = """
         <?xml version="1.0" encoding="utf-8"?>
