@@ -199,14 +199,14 @@ class HeheJuicePatches : IXposedHookLoadPackage {
         }
 
         val targetClass = "com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity"
-        val versionCode = lpparam.appInfo.versionCode
+        // 修复: 使用 longVersionCode 替代已废弃的 versionCode
+        val versionCode = lpparam.appInfo?.longVersionCode ?: 0L
         val targetMethod = findTargetMethod(lpparam, targetClass, versionCode)
 
         if (targetMethod != null) {
             XposedBridge.log("$tag: hooking method -> ${targetMethod.toGenericString()}")
             XposedBridge.hookMethod(targetMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    // 1. 主動觸發震動服務 (因為原方法被跳過)
                     val context = param.thisObject as? Context
                     context?.getSystemService(Context.VIBRATOR_SERVICE)?.let { vibrator ->
                         if (vibrator is Vibrator) {
@@ -214,7 +214,6 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                             XposedBridge.log("$tag: ${targetMethod.name} -> manually triggered vibration")
                         }
                     }
-                    // 2. 阻斷原方法，防止 NoSuchMethodError
                     param.result = null
                 }
             })
@@ -224,15 +223,10 @@ class HeheJuicePatches : IXposedHookLoadPackage {
         }
     }
 
-    /**
-     * 尋找目標方法 (包含緩存機制與動態降級)
-     */
     private fun findTargetMethod(lpparam: LoadPackageParam, className: String, versionCode: Long): Method? {
         val tag = "HeheJuice"
         val cacheKey = "ScreenCaptureViewerActivity_Method_v$versionCode"
 
-        // 嘗試讀取緩存 (使用模塊自身的 SharedPreferences，需在目標進程中獲取)
-        // 注意：這裡使用簡單的靜態變量緩存，若要跨進程持久化，需使用 XSharedPreferences
         val prefs = getModulePrefs(lpparam)
         val cachedSignature = prefs?.getString(cacheKey, null)
 
@@ -251,7 +245,6 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             }
         }
 
-        // 如果緩存失效，使用 DexKit 掃描
         var foundMethod: Method? = null
         val latch = CountDownLatch(1)
         val apkPath = lpparam.appInfo.sourceDir
@@ -260,28 +253,18 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             try {
                 System.loadLibrary("dexkit")
                 DexKitBridge.create(apkPath).use { bridge ->
+                    // 使用更稳妥的 DexKit API 查询
                     val results = bridge.findMethod {
                         matcher {
                             declaredClass = className
                             returnType = "void"
-                            // 匹配可能的重載： (float, int) 或 (int, int, float)
-                            // 為了兼容性，只要參數中同時包含 float 和 int 即可
-                            paramTypes("float", "int", "int")
+                            paramCount = 3 // 根据崩溃日志，大概率是 3 个参数 (float, int, ...)
                         }
                     }
 
-                    // 如果找不到精確的，放寬條件：只要參數是 2 個或 3 個，且包含 float 和 int
-                    val methodData = results.firstOrNull() ?: bridge.findMethod {
-                        matcher {
-                            declaredClass = className
-                            returnType = "void"
-                            paramCount = 3 // 或者 paramCount = 2，視具體情況
-                        }
-                    }.firstOrNull()
-
+                    val methodData = results.firstOrNull()
                     if (methodData != null) {
                         foundMethod = methodData.getMethodInstance(lpparam.classLoader)
-                        // 寫入緩存
                         foundMethod?.let { m ->
                             val signature = "${m.declaringClass.name}#${m.name}#${m.parameterTypes.joinToString(",") { it.name }}"
                             prefs?.edit()?.putString(cacheKey, signature)?.apply()
@@ -295,21 +278,19 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             }
         }.start()
 
-        // 阻塞等待 DexKit 結果 (最多等 5 秒，防止 ANR)
         try {
             latch.await(5, TimeUnit.SECONDS)
         } catch (e: InterruptedException) {
             XposedBridge.log("$tag: DexKit wait interrupted")
         }
 
-        // 如果 DexKit 失敗，降級為硬編碼嘗試
+        // 兜底策略：如果 DexKit 失败，尝试已知的混淆名称
         if (foundMethod == null) {
             XposedBridge.log("$tag: DexKit failed, falling back to hardcoded names...")
             val fallbackNames = listOf("b0", "i0")
             for (name in fallbackNames) {
                 try {
                     val cls = Class.forName(className, false, lpparam.classLoader)
-                    // 嘗試尋找對應的方法，這裡不確定參數，所以遍歷
                     foundMethod = cls.declaredMethods.firstOrNull { it.name == name && it.returnType == Void.TYPE }
                     if (foundMethod != null) {
                         XposedBridge.log("$tag: Fallback found method -> ${foundMethod.toGenericString()}")
@@ -324,7 +305,6 @@ class HeheJuicePatches : IXposedHookLoadPackage {
 
     private fun getModulePrefs(lpparam: LoadPackageParam): SharedPreferences? {
         return try {
-            // 在目標應用的沙盒中創建一個專屬該模塊的 SharedPreferences
             val context = XposedHelpers.callStaticMethod(
                 XposedHelpers.findClass("android.app.ActivityThread", lpparam.classLoader),
                 "currentApplication"
