@@ -200,17 +200,16 @@ class HeheJuicePatches : IXposedHookLoadPackage {
 
         val targetClass = "com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity"
         
-        // 修复: 使用 versionCode 消除 Unresolved reference 错误
-        @Suppress("DEPRECATION")
-        val versionCode = lpparam.appInfo?.versionCode?.toLong() ?: 0L
+        // 修复: 使用 APK 文件最后修改时间作为缓存 Key，无需 versionCode
+        val apkFile = File(lpparam.appInfo?.sourceDir ?: "")
+        val cacheKey = "ScreenCaptureViewerActivity_Method_${apkFile.lastModified()}"
         
-        val targetMethod = findTargetMethod(lpparam, targetClass, versionCode)
+        val targetMethod = findTargetMethod(lpparam, targetClass, cacheKey)
 
         if (targetMethod != null) {
             XposedBridge.log("$tag: hooking method -> ${targetMethod.toGenericString()}")
             XposedBridge.hookMethod(targetMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    // 1. 手動觸發震動 (因為原方法被跳過)
                     val context = param.thisObject as? Context
                     context?.getSystemService(Context.VIBRATOR_SERVICE)?.let { vibrator ->
                         if (vibrator is Vibrator) {
@@ -218,7 +217,6 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                             XposedBridge.log("$tag: ${targetMethod.name} -> manually triggered vibration")
                         }
                     }
-                    // 2. 阻斷原方法，防止 NoSuchMethodError
                     param.result = null
                 }
             })
@@ -228,13 +226,8 @@ class HeheJuicePatches : IXposedHookLoadPackage {
         }
     }
 
-    /**
-     * 尋找目標方法 (包含緩存機制與動態降級)
-     */
-    private fun findTargetMethod(lpparam: LoadPackageParam, className: String, versionCode: Long): Method? {
+    private fun findTargetMethod(lpparam: LoadPackageParam, className: String, cacheKey: String): Method? {
         val tag = "HeheJuice"
-        val cacheKey = "ScreenCaptureViewerActivity_Method_v$versionCode"
-
         val prefs = getModulePrefs(lpparam)
         val cachedSignature = prefs?.getString(cacheKey, null)
 
@@ -265,7 +258,7 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                         matcher {
                             declaredClass = className
                             returnType = "void"
-                            paramCount = 3 // 根據崩潰日誌，大概率是 3 個參數
+                            paramCount = 3
                         }
                     }
 
