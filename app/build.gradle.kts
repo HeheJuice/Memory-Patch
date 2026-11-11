@@ -42,6 +42,14 @@ android {
         }
     }
 
+    // ⚠️ 重要：DexKit 需要加载 native 库 (.so)
+    // 必须将 useLegacyPackaging 设为 true，否则 Xposed 环境无法提取并加载该库
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -53,6 +61,9 @@ android {
 }
 
 dependencies {
-        compileOnly("de.robv.android.xposed:api:82")
-        implementation("androidx.appcompat:appcompat:1.6.1")
+    compileOnly("de.robv.android.xposed:api:82")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    
+    // ⚠️ 添加 DexKit 依赖
+    implementation("org.luckypray:dexkit:2.0.7") 
 }

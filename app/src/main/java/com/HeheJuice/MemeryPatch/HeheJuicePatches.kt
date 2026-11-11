@@ -1,6 +1,7 @@
 package com.HeheJuice.MemeryPatch
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -9,9 +10,13 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
+import org.luckypray.dexkit.DexKitBridge
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
+import java.lang.reflect.Method
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class HeheJuicePatches : IXposedHookLoadPackage {
 
@@ -45,20 +50,17 @@ class HeheJuicePatches : IXposedHookLoadPackage {
     """.trimIndent()
 
     override fun handleLoadPackage(lpparam: LoadPackageParam) {
-        // 診斷第一步: 無條件記錄模塊是否被注入到當前進程
         XposedBridge.log("HeheJuice: ===== LOADED into ${lpparam.packageName} =====")
-
         if (lpparam.packageName == null) return
 
         val targetPath = "/system/etc/permissions/com.samsung.android.oneui.version.xml"
         val xmlBytes = customXmlContent.toByteArray(Charsets.UTF_8)
 
         // =========================================================
-        // LAYER 1: SYSTEM PROPERTIES & INT OVERRIDES (All Apps)
+        // LAYER 1: SYSTEM PROPERTIES & INT OVERRIDES
         // =========================================================
         try {
             val systemPropertiesClass = XposedHelpers.findClass("android.os.SystemProperties", lpparam.classLoader)
-
             val propHookString = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val key = param.args[0] as? String ?: return
@@ -77,39 +79,27 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                 }
             }
             XposedHelpers.findAndHookMethod(systemPropertiesClass, "getInt", String::class.java, Int::class.javaPrimitiveType, propHookInt)
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L1A failed: $t")
-        }
+        } catch (t: Throwable) { XposedBridge.log("HeheJuice: L1A failed: $t") }
 
-        // 1B. Spoof PackageManager.hasSystemFeature
         try {
             val featureHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val featureName = param.args[0] as? String ?: return
-                    if (featureName.startsWith("com.samsung.android.oneui.version")) {
-                        param.result = true
-                    }
+                    if (featureName.startsWith("com.samsung.android.oneui.version")) param.result = true
                 }
             }
             XposedHelpers.findAndHookMethod("android.app.ApplicationPackageManager", lpparam.classLoader, "hasSystemFeature", String::class.java, featureHook)
             XposedHelpers.findAndHookMethod("android.app.ApplicationPackageManager", lpparam.classLoader, "hasSystemFeature", String::class.java, Int::class.javaPrimitiveType, featureHook)
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L1B failed: $t")
-        }
+        } catch (t: Throwable) { XposedBridge.log("HeheJuice: L1B failed: $t") }
 
-        // 1C. Spoof Samsung's Hidden Static Build Variables
         try {
             val buildVersionClass = XposedHelpers.findClass("android.os.Build\$VERSION", lpparam.classLoader)
             XposedHelpers.setStaticIntField(buildVersionClass, "SEM_PLATFORM_INT", 180500)
             XposedHelpers.setStaticIntField(buildVersionClass, "SEM_INT", 180500)
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L1C failed: $t")
-        }
+        } catch (t: Throwable) { XposedBridge.log("HeheJuice: L1C failed: $t") }
 
-        // 1D. Spoof Samsung's Proprietary SemSystemProperties Wrapper
         try {
             val semSystemPropertiesClass = XposedHelpers.findClass("android.os.SemSystemProperties", lpparam.classLoader)
-
             val semPropHookString = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val key = param.args[0] as? String ?: return
@@ -119,7 +109,6 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             }
             XposedHelpers.findAndHookMethod(semSystemPropertiesClass, "get", String::class.java, semPropHookString)
             XposedHelpers.findAndHookMethod(semSystemPropertiesClass, "get", String::class.java, String::class.java, semPropHookString)
-
             val semPropHookInt = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val key = param.args[0] as? String ?: return
@@ -128,68 +117,36 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                 }
             }
             XposedHelpers.findAndHookMethod(semSystemPropertiesClass, "getInt", String::class.java, Int::class.javaPrimitiveType, semPropHookInt)
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L1D failed: $t")
-        }
+        } catch (t: Throwable) { XposedBridge.log("HeheJuice: L1D failed: $t") }
 
         // =========================================================
-        // LAYER 2: UNIVERSAL VIRTUAL FILE SIMULATION (All Apps)
+        // LAYER 2: UNIVERSAL VIRTUAL FILE SIMULATION
         // =========================================================
-
-        // 2A. Mock existence globally
         try {
             XposedHelpers.findAndHookMethod(File::class.java, "exists", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    val file = param.thisObject as File
-                    if (file.absolutePath == targetPath) {
-                        param.result = true
-                    }
+                    if ((param.thisObject as File).absolutePath == targetPath) param.result = true
                 }
             })
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L2A failed: $t")
-        }
-
-        // 2B. Mock file length metrics
-        try {
             XposedHelpers.findAndHookMethod(File::class.java, "length", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    val file = param.thisObject as File
-                    if (file.absolutePath == targetPath) {
-                        param.result = xmlBytes.size.toLong()
-                    }
+                    if ((param.thisObject as File).absolutePath == targetPath) param.result = xmlBytes.size.toLong()
                 }
             })
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L2B failed: $t")
-        }
-
-        // 2C. Intercept FileInputStream constructors safely via /dev/null redirect
-        try {
             val fileStreamHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val arg = param.args[0]
                     val path = if (arg is File) arg.absolutePath else arg as? String
-
                     if (path == targetPath) {
                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "isOneUISpoofStream", true)
                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "spoofStream", ByteArrayInputStream(xmlBytes))
-                        if (arg is File) {
-                            param.args[0] = File("/dev/null")
-                        } else {
-                            param.args[0] = "/dev/null"
-                        }
+                        param.args[0] = if (arg is File) File("/dev/null") else "/dev/null"
                     }
                 }
             }
             XposedHelpers.findAndHookConstructor(FileInputStream::class.java, File::class.java, fileStreamHook)
             XposedHelpers.findAndHookConstructor(FileInputStream::class.java, String::class.java, fileStreamHook)
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L2C failed: $t")
-        }
 
-        // 2D. Handle byte-array parsing transactions directly
-        try {
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "read", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
@@ -198,29 +155,22 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                     }
                 }
             })
-
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "read", ByteArray::class.java, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
                         val bis = XposedHelpers.getAdditionalInstanceField(param.thisObject, "spoofStream") as ByteArrayInputStream
-                        val b = param.args[0] as ByteArray
-                        param.result = bis.read(b)
+                        param.result = bis.read(param.args[0] as ByteArray)
                     }
                 }
             })
-
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "read", ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
                         val bis = XposedHelpers.getAdditionalInstanceField(param.thisObject, "spoofStream") as ByteArrayInputStream
-                        val b = param.args[0] as ByteArray
-                        val off = param.args[1] as Int
-                        val len = param.args[2] as Int
-                        param.result = bis.read(b, off, len)
+                        param.result = bis.read(param.args[0] as ByteArray, param.args[1] as Int, param.args[2] as Int)
                     }
                 }
             })
-
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "available", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
@@ -229,96 +179,175 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                     }
                 }
             })
-        } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L2D failed: $t")
-        }
+        } catch (t: Throwable) { XposedBridge.log("HeheJuice: L2 failed: $t") }
 
         // =========================================================
         // LAYER 3: com.samsung.android.app.memory 振動兼容修復
-        // 崩潰: NoSuchMethodError VibrationEffect.semCreateWaveform(IIF)
-        // 方案: One UI 8 系統缺此方法 -> Hook 攔截並主動觸發震動
         // =========================================================
         if (lpparam.packageName == "com.samsung.android.app.memory") {
             installMemoryVibrationFix(lpparam)
         }
     }
 
-    // -----------------------------------------------------------------
-    // LAYER 3 實現
-    // -----------------------------------------------------------------
     private fun installMemoryVibrationFix(lpparam: LoadPackageParam) {
         val tag = "HeheJuice"
         XposedBridge.log("$tag: ====== LAYER3 START for ${lpparam.packageName} ======")
 
-        // 1) 檢查系統是否真的缺少 semCreateWaveform(IIF)
         if (systemHasSemCreateWaveform()) {
             XposedBridge.log("$tag: API exists, no patch needed.")
             return
         }
 
-        // 2) 加載目標類(不初始化)
-        val cls: Class<*>
-        try {
-            cls = Class.forName(
-                "com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity",
-                false,
-                lpparam.classLoader
-            )
-            XposedBridge.log("$tag: target class loaded -> ${cls.name}")
-        } catch (t: Throwable) {
-            XposedBridge.log("$tag: !! Class.forName FAILED: $t")
-            return
+        val targetClass = "com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity"
+        val versionCode = lpparam.appInfo.versionCode
+        val targetMethod = findTargetMethod(lpparam, targetClass, versionCode)
+
+        if (targetMethod != null) {
+            XposedBridge.log("$tag: hooking method -> ${targetMethod.toGenericString()}")
+            XposedBridge.hookMethod(targetMethod, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 1. 主動觸發震動服務 (因為原方法被跳過)
+                    val context = param.thisObject as? Context
+                    context?.getSystemService(Context.VIBRATOR_SERVICE)?.let { vibrator ->
+                        if (vibrator is Vibrator) {
+                            vibrator.vibrate(createBuzzVibrationEffect())
+                            XposedBridge.log("$tag: ${targetMethod.name} -> manually triggered vibration")
+                        }
+                    }
+                    // 2. 阻斷原方法，防止 NoSuchMethodError
+                    param.result = null
+                }
+            })
+            XposedBridge.log("$tag: ====== LAYER3 DONE ======")
+        } else {
+            XposedBridge.log("$tag: !! Failed to locate target method. Patch not applied.")
+        }
+    }
+
+    /**
+     * 尋找目標方法 (包含緩存機制與動態降級)
+     */
+    private fun findTargetMethod(lpparam: LoadPackageParam, className: String, versionCode: Long): Method? {
+        val tag = "HeheJuice"
+        val cacheKey = "ScreenCaptureViewerActivity_Method_v$versionCode"
+
+        // 嘗試讀取緩存 (使用模塊自身的 SharedPreferences，需在目標進程中獲取)
+        // 注意：這裡使用簡單的靜態變量緩存，若要跨進程持久化，需使用 XSharedPreferences
+        val prefs = getModulePrefs(lpparam)
+        val cachedSignature = prefs?.getString(cacheKey, null)
+
+        if (cachedSignature != null) {
+            try {
+                val parts = cachedSignature.split("#")
+                if (parts.size == 3) {
+                    val cls = Class.forName(parts[0], false, lpparam.classLoader)
+                    val paramTypes = parseParamTypes(parts[2], lpparam.classLoader)
+                    val method = cls.getDeclaredMethod(parts[1], *paramTypes)
+                    XposedBridge.log("$tag: Loaded method from cache -> ${method.toGenericString()}")
+                    return method
+                }
+            } catch (e: Throwable) {
+                XposedBridge.log("$tag: Cache invalid, re-scanning... ($e)")
+            }
         }
 
-        // 3) 同時尋找 b0 (舊版) 和 i0 (新版 v1.0.00.48)
-        val targetMethodNames = listOf("b0", "i0")
-        var totalHooked = 0
+        // 如果緩存失效，使用 DexKit 掃描
+        var foundMethod: Method? = null
+        val latch = CountDownLatch(1)
+        val apkPath = lpparam.appInfo.sourceDir
 
-        val hook = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val m = param.method as? java.lang.reflect.Method
-                XposedBridge.log("$tag: >>> ${m?.name} HIT -> ${m?.toGenericString() ?: param.method.name}")
-                
-                // a. 主動觸發震動服務
-                val context = param.thisObject as? Context
-                context?.getSystemService(Context.VIBRATOR_SERVICE)?.let { vibrator ->
-                    if (vibrator is Vibrator) {
-                        val effect = createBuzzVibrationEffect()
-                        if (effect != null) {
-                            vibrator.vibrate(effect)
-                            XposedBridge.log("$tag: ${m?.name} -> manually triggered buzz effect")
-                        } else {
-                            vibrator.vibrate(80L)
-                            XposedBridge.log("$tag: ${m?.name} -> manually triggered fallback vibration")
+        Thread {
+            try {
+                System.loadLibrary("dexkit")
+                DexKitBridge.create(apkPath).use { bridge ->
+                    val results = bridge.findMethod {
+                        matcher {
+                            declaredClass = className
+                            returnType = "void"
+                            // 匹配可能的重載： (float, int) 或 (int, int, float)
+                            // 為了兼容性，只要參數中同時包含 float 和 int 即可
+                            paramTypes("float", "int", "int")
+                        }
+                    }
+
+                    // 如果找不到精確的，放寬條件：只要參數是 2 個或 3 個，且包含 float 和 int
+                    val methodData = results.firstOrNull() ?: bridge.findMethod {
+                        matcher {
+                            declaredClass = className
+                            returnType = "void"
+                            paramCount = 3 // 或者 paramCount = 2，視具體情況
+                        }
+                    }.firstOrNull()
+
+                    if (methodData != null) {
+                        foundMethod = methodData.getMethodInstance(lpparam.classLoader)
+                        // 寫入緩存
+                        foundMethod?.let { m ->
+                            val signature = "${m.declaringClass.name}#${m.name}#${m.parameterTypes.joinToString(",") { it.name }}"
+                            prefs?.edit()?.putString(cacheKey, signature)?.apply()
                         }
                     }
                 }
-
-                // b. 阻斷原方法，防止 NoSuchMethodError
-                // b0 和 i0 都是 void 方法，設置 null 即可跳過原方法體
-                param.result = null 
+            } catch (t: Throwable) {
+                XposedBridge.log("$tag: DexKit scan failed: $t")
+            } finally {
+                latch.countDown()
             }
+        }.start()
+
+        // 阻塞等待 DexKit 結果 (最多等 5 秒，防止 ANR)
+        try {
+            latch.await(5, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            XposedBridge.log("$tag: DexKit wait interrupted")
         }
 
-        for (methodName in targetMethodNames) {
-            val methods = cls.declaredMethods.filter { it.name == methodName }
-            if (methods.isNotEmpty()) {
-                for (m in methods) {
-                    try {
-                        XposedBridge.hookMethod(m, hook)
-                        XposedBridge.log("$tag: hooked -> ${m.toGenericString()}")
-                        totalHooked++
-                    } catch (t: Throwable) {
-                        XposedBridge.log("$tag: hookMethod FAILED for $m: $t")
+        // 如果 DexKit 失敗，降級為硬編碼嘗試
+        if (foundMethod == null) {
+            XposedBridge.log("$tag: DexKit failed, falling back to hardcoded names...")
+            val fallbackNames = listOf("b0", "i0")
+            for (name in fallbackNames) {
+                try {
+                    val cls = Class.forName(className, false, lpparam.classLoader)
+                    // 嘗試尋找對應的方法，這裡不確定參數，所以遍歷
+                    foundMethod = cls.declaredMethods.firstOrNull { it.name == name && it.returnType == Void.TYPE }
+                    if (foundMethod != null) {
+                        XposedBridge.log("$tag: Fallback found method -> ${foundMethod.toGenericString()}")
+                        break
                     }
-                }
+                } catch (_: Throwable) {}
             }
         }
-        
-        XposedBridge.log("$tag: ====== LAYER3 DONE, total hooked=$totalHooked ======")
+
+        return foundMethod
     }
 
-    /** 檢查系統是否真的存在 semCreateWaveform(IIF) */
+    private fun getModulePrefs(lpparam: LoadPackageParam): SharedPreferences? {
+        return try {
+            // 在目標應用的沙盒中創建一個專屬該模塊的 SharedPreferences
+            val context = XposedHelpers.callStaticMethod(
+                XposedHelpers.findClass("android.app.ActivityThread", lpparam.classLoader),
+                "currentApplication"
+            ) as? Context
+            context?.getSharedPreferences("HeheJuice_Memory_Patch", Context.MODE_PRIVATE)
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    private fun parseParamTypes(paramStr: String, classLoader: ClassLoader): Array<Class<*>> {
+        if (paramStr.isEmpty()) return emptyArray()
+        return paramStr.split(",").map { type ->
+            when (type) {
+                "int" -> Int::class.javaPrimitiveType!!
+                "float" -> Float::class.javaPrimitiveType!!
+                "boolean" -> Boolean::class.javaPrimitiveType!!
+                "long" -> Long::class.javaPrimitiveType!!
+                else -> Class.forName(type, false, classLoader)
+            }
+        }.toTypedArray()
+    }
+
     private fun systemHasSemCreateWaveform(): Boolean {
         return try {
             VibrationEffect::class.java.getDeclaredMethod(
@@ -328,38 +357,20 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                 Float::class.javaPrimitiveType
             )
             true
-        } catch (_: NoSuchMethodException) {
-            false
-        } catch (_: Throwable) {
-            false
-        }
+        } catch (_: Throwable) { false }
     }
 
-    /**
-     * 構造一段"滋滋"蜂鳴式振動效果。
-     * 用多段短脈衝 + 短間隔交替，產生類似馬達/蜂鳴的連續感。
-     * timings 與 amplitudes 一一對應：
-     *   amplitude = 0 表示該段靜止，> 0 表示該段振動。
-     */
     private fun createBuzzVibrationEffect(): VibrationEffect? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
-
-        // 主方案：蜂鳴波形 (5 段 18ms 振動 + 12ms 間隔 ≈ 138ms)
-        try {
+        return try {
             val timings = longArrayOf(0L, 18, 12, 18, 12, 18, 12, 18, 12, 18)
             val amplitudes = intArrayOf(0, 220, 0, 220, 0, 220, 0, 220, 0, 220)
-            return VibrationEffect.createWaveform(timings, amplitudes, -1)
+            VibrationEffect.createWaveform(timings, amplitudes, -1)
         } catch (_: Throwable) {
-            // 回退：一次較明顯的單脈衝
             try {
-                return VibrationEffect.createOneShot(80L, 200)
+                VibrationEffect.createOneShot(80L, 200)
             } catch (_: Throwable) {
-                // 最後回退：輕微點擊
-                return try {
-                    VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
-                } catch (_: Throwable) {
-                    null
-                }
+                try { VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK) } catch (_: Throwable) { null }
             }
         }
     }
