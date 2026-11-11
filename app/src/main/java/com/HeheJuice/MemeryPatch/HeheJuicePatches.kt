@@ -199,14 +199,18 @@ class HeheJuicePatches : IXposedHookLoadPackage {
         }
 
         val targetClass = "com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity"
-        // 修复: 使用 longVersionCode 替代已废弃的 versionCode
-        val versionCode = lpparam.appInfo?.longVersionCode ?: 0L
+        
+        // 修复: 使用 versionCode 消除 Unresolved reference 错误
+        @Suppress("DEPRECATION")
+        val versionCode = lpparam.appInfo?.versionCode?.toLong() ?: 0L
+        
         val targetMethod = findTargetMethod(lpparam, targetClass, versionCode)
 
         if (targetMethod != null) {
             XposedBridge.log("$tag: hooking method -> ${targetMethod.toGenericString()}")
             XposedBridge.hookMethod(targetMethod, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    // 1. 手動觸發震動 (因為原方法被跳過)
                     val context = param.thisObject as? Context
                     context?.getSystemService(Context.VIBRATOR_SERVICE)?.let { vibrator ->
                         if (vibrator is Vibrator) {
@@ -214,6 +218,7 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                             XposedBridge.log("$tag: ${targetMethod.name} -> manually triggered vibration")
                         }
                     }
+                    // 2. 阻斷原方法，防止 NoSuchMethodError
                     param.result = null
                 }
             })
@@ -223,6 +228,9 @@ class HeheJuicePatches : IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * 尋找目標方法 (包含緩存機制與動態降級)
+     */
     private fun findTargetMethod(lpparam: LoadPackageParam, className: String, versionCode: Long): Method? {
         val tag = "HeheJuice"
         val cacheKey = "ScreenCaptureViewerActivity_Method_v$versionCode"
@@ -253,12 +261,11 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             try {
                 System.loadLibrary("dexkit")
                 DexKitBridge.create(apkPath).use { bridge ->
-                    // 使用更稳妥的 DexKit API 查询
                     val results = bridge.findMethod {
                         matcher {
                             declaredClass = className
                             returnType = "void"
-                            paramCount = 3 // 根据崩溃日志，大概率是 3 个参数 (float, int, ...)
+                            paramCount = 3 // 根據崩潰日誌，大概率是 3 個參數
                         }
                     }
 
@@ -284,7 +291,6 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             XposedBridge.log("$tag: DexKit wait interrupted")
         }
 
-        // 兜底策略：如果 DexKit 失败，尝试已知的混淆名称
         if (foundMethod == null) {
             XposedBridge.log("$tag: DexKit failed, falling back to hardcoded names...")
             val fallbackNames = listOf("b0", "i0")
