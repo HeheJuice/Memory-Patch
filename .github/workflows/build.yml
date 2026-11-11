@@ -1,0 +1,52 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+    paths-ignore:
+      - 'README.md'
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java Development Kit
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      # Decodes Base64 secret directly into app directory
+      - name: Prepare Keystore
+        run: |
+          echo "${{ secrets.SIGNING_KEY }}" | base64 -d --ignore-garbage > app/debug.keystore
+
+      - name: Compile Debug APK
+        run: gradle assembleDebug
+        env:
+          RELEASE_SIGNING_PASSWORD: android
+          RELEASE_SIGNING_KEY_ALIAS: HeheJuice
+          RELEASE_SIGNING_KEY_PASSWORD: android
+
+      - name: Upload APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: debug-build-${{ github.run_number }}
+          name: Debug Build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
+          prerelease: true
+          fail_on_unmatched_files: true

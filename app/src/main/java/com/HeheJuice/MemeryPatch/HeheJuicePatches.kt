@@ -1,7 +1,9 @@
 package com.HeheJuice.MemeryPatch
 
+import android.content.Context
 import android.os.Build
 import android.os.VibrationEffect
+import android.os.Vibrator
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -10,7 +12,6 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
-import java.util.ArrayList
 
 class HeheJuicePatches : IXposedHookLoadPackage {
 
@@ -44,6 +45,7 @@ class HeheJuicePatches : IXposedHookLoadPackage {
     """.trimIndent()
 
     override fun handleLoadPackage(lpparam: LoadPackageParam) {
+        // 診斷第一步: 無條件記錄模塊是否被注入到當前進程
         XposedBridge.log("HeheJuice: ===== LOADED into ${lpparam.packageName} =====")
 
         if (lpparam.packageName == null) return
@@ -51,7 +53,9 @@ class HeheJuicePatches : IXposedHookLoadPackage {
         val targetPath = "/system/etc/permissions/com.samsung.android.oneui.version.xml"
         val xmlBytes = customXmlContent.toByteArray(Charsets.UTF_8)
 
-        // ========================= LAYER 1 =========================
+        // =========================================================
+        // LAYER 1: SYSTEM PROPERTIES & INT OVERRIDES (All Apps)
+        // =========================================================
         try {
             val systemPropertiesClass = XposedHelpers.findClass("android.os.SystemProperties", lpparam.classLoader)
 
@@ -77,11 +81,14 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             XposedBridge.log("HeheJuice: L1A failed: $t")
         }
 
+        // 1B. Spoof PackageManager.hasSystemFeature
         try {
             val featureHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val featureName = param.args[0] as? String ?: return
-                    if (featureName.startsWith("com.samsung.android.oneui.version")) param.result = true
+                    if (featureName.startsWith("com.samsung.android.oneui.version")) {
+                        param.result = true
+                    }
                 }
             }
             XposedHelpers.findAndHookMethod("android.app.ApplicationPackageManager", lpparam.classLoader, "hasSystemFeature", String::class.java, featureHook)
@@ -90,6 +97,7 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             XposedBridge.log("HeheJuice: L1B failed: $t")
         }
 
+        // 1C. Spoof Samsung's Hidden Static Build Variables
         try {
             val buildVersionClass = XposedHelpers.findClass("android.os.Build\$VERSION", lpparam.classLoader)
             XposedHelpers.setStaticIntField(buildVersionClass, "SEM_PLATFORM_INT", 180500)
@@ -98,6 +106,7 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             XposedBridge.log("HeheJuice: L1C failed: $t")
         }
 
+        // 1D. Spoof Samsung's Proprietary SemSystemProperties Wrapper
         try {
             val semSystemPropertiesClass = XposedHelpers.findClass("android.os.SemSystemProperties", lpparam.classLoader)
 
@@ -123,32 +132,64 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             XposedBridge.log("HeheJuice: L1D failed: $t")
         }
 
-        // ========================= LAYER 2 =========================
+        // =========================================================
+        // LAYER 2: UNIVERSAL VIRTUAL FILE SIMULATION (All Apps)
+        // =========================================================
+
+        // 2A. Mock existence globally
         try {
             XposedHelpers.findAndHookMethod(File::class.java, "exists", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if ((param.thisObject as File).absolutePath == targetPath) param.result = true
+                    val file = param.thisObject as File
+                    if (file.absolutePath == targetPath) {
+                        param.result = true
+                    }
                 }
             })
+        } catch (t: Throwable) {
+            XposedBridge.log("HeheJuice: L2A failed: $t")
+        }
+
+        // 2B. Mock file length metrics
+        try {
             XposedHelpers.findAndHookMethod(File::class.java, "length", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if ((param.thisObject as File).absolutePath == targetPath) param.result = xmlBytes.size.toLong()
+                    val file = param.thisObject as File
+                    if (file.absolutePath == targetPath) {
+                        param.result = xmlBytes.size.toLong()
+                    }
                 }
             })
+        } catch (t: Throwable) {
+            XposedBridge.log("HeheJuice: L2B failed: $t")
+        }
+
+        // 2C. Intercept FileInputStream constructors safely via /dev/null redirect
+        try {
             val fileStreamHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val arg = param.args[0]
                     val path = if (arg is File) arg.absolutePath else arg as? String
+
                     if (path == targetPath) {
                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "isOneUISpoofStream", true)
                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "spoofStream", ByteArrayInputStream(xmlBytes))
-                        param.args[0] = if (arg is File) File("/dev/null") else "/dev/null"
+                        if (arg is File) {
+                            param.args[0] = File("/dev/null")
+                        } else {
+                            param.args[0] = "/dev/null"
+                        }
                     }
                 }
             }
             XposedHelpers.findAndHookConstructor(FileInputStream::class.java, File::class.java, fileStreamHook)
             XposedHelpers.findAndHookConstructor(FileInputStream::class.java, String::class.java, fileStreamHook)
+        } catch (t: Throwable) {
+            XposedBridge.log("HeheJuice: L2C failed: $t")
+        }
 
+        // 2D. Handle byte-array parsing transactions directly
+        try {
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "read", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
@@ -157,22 +198,29 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                     }
                 }
             })
+
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "read", ByteArray::class.java, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
                         val bis = XposedHelpers.getAdditionalInstanceField(param.thisObject, "spoofStream") as ByteArrayInputStream
-                        param.result = bis.read(param.args[0] as ByteArray)
+                        val b = param.args[0] as ByteArray
+                        param.result = bis.read(b)
                     }
                 }
             })
+
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "read", ByteArray::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
                         val bis = XposedHelpers.getAdditionalInstanceField(param.thisObject, "spoofStream") as ByteArrayInputStream
-                        param.result = bis.read(param.args[0] as ByteArray, param.args[1] as Int, param.args[2] as Int)
+                        val b = param.args[0] as ByteArray
+                        val off = param.args[1] as Int
+                        val len = param.args[2] as Int
+                        param.result = bis.read(b, off, len)
                     }
                 }
             })
+
             XposedHelpers.findAndHookMethod(FileInputStream::class.java, "available", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (XposedHelpers.getAdditionalInstanceField(param.thisObject, "isOneUISpoofStream") == true) {
@@ -182,26 +230,33 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                 }
             })
         } catch (t: Throwable) {
-            XposedBridge.log("HeheJuice: L2 failed: $t")
+            XposedBridge.log("HeheJuice: L2D failed: $t")
         }
 
-        // ========================= LAYER 3 =========================
+        // =========================================================
+        // LAYER 3: com.samsung.android.app.memory 振動兼容修復
+        // 崩潰: NoSuchMethodError VibrationEffect.semCreateWaveform(IIF)
+        // 方案: One UI 8 系統缺此方法 -> Hook 攔截並主動觸發震動
+        // =========================================================
         if (lpparam.packageName == "com.samsung.android.app.memory") {
             installMemoryVibrationFix(lpparam)
         }
     }
 
+    // -----------------------------------------------------------------
+    // LAYER 3 實現
+    // -----------------------------------------------------------------
     private fun installMemoryVibrationFix(lpparam: LoadPackageParam) {
         val tag = "HeheJuice"
         XposedBridge.log("$tag: ====== LAYER3 START for ${lpparam.packageName} ======")
 
-        val hasApi = systemHasSemCreateWaveform()
-        XposedBridge.log("$tag: systemHasSemCreateWaveform(IIF) = $hasApi")
-        if (hasApi) {
+        // 1) 檢查系統是否真的缺少 semCreateWaveform(IIF)
+        if (systemHasSemCreateWaveform()) {
             XposedBridge.log("$tag: API exists, no patch needed.")
             return
         }
 
+        // 2) 加載目標類(不初始化)
         val cls: Class<*>
         try {
             cls = Class.forName(
@@ -215,56 +270,55 @@ class HeheJuicePatches : IXposedHookLoadPackage {
             return
         }
 
-        val b0Methods = cls.declaredMethods.filter { it.name == "b0" }
-        XposedBridge.log("$tag: declared b0 count = ${b0Methods.size}")
-        if (b0Methods.isEmpty()) {
-            XposedBridge.log("$tag: !! b0 NOT FOUND. Dump:")
-            cls.declaredMethods.forEach { XposedBridge.log("$tag:   ${it.toGenericString()}") }
-            return
-        }
-        b0Methods.forEach { XposedBridge.log("$tag: b0 candidate -> ${it.toGenericString()}") }
+        // 3) 同時尋找 b0 (舊版) 和 i0 (新版 v1.0.00.48)
+        val targetMethodNames = listOf("b0", "i0")
+        var totalHooked = 0
 
         val hook = object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                val args = param.args ?: emptyArray()
-                // b0(IIF) => hapticId, repeatIndex, scale
-                val hapticId = args.getOrNull(0) as? Int ?: -1
-                val repeatIndex = args.getOrNull(1) as? Int ?: -1
-                val scale = args.getOrNull(2) as? Float ?: 1.0f
-
-                XposedBridge.log("$tag: >>> b0 HIT args=(hapticId=$hapticId, repeatIndex=$repeatIndex, scale=$scale)")
-
-                // 1) 首选: 用 UI9 同样的 SemHapticSegment + Composed 完全还原
-                var effect = buildSemWaveform(hapticId, repeatIndex, scale)
-                if (effect != null) {
-                    XposedBridge.log("$tag: b0 -> restored SEM effect (hapticId=$hapticId, scale=$scale)")
-                } else {
-                    // 2) UI9 失败回退路径: 用 0xc3a4 的通用 haptic
-                    effect = buildSemWaveform(0xc3a4, repeatIndex, 1.0f)
-                    if (effect != null) {
-                        XposedBridge.log("$tag: b0 -> fallback SEM effect (0xc3a4)")
-                    } else {
-                        // 3) 最后兜底: 蜂鸣波形
-                        effect = createBuzzVibrationEffect()
-                        XposedBridge.log("$tag: b0 -> fallback buzz waveform")
+                val m = param.method as? java.lang.reflect.Method
+                XposedBridge.log("$tag: >>> ${m?.name} HIT -> ${m?.toGenericString() ?: param.method.name}")
+                
+                // a. 主動觸發震動服務
+                val context = param.thisObject as? Context
+                context?.getSystemService(Context.VIBRATOR_SERVICE)?.let { vibrator ->
+                    if (vibrator is Vibrator) {
+                        val effect = createBuzzVibrationEffect()
+                        if (effect != null) {
+                            vibrator.vibrate(effect)
+                            XposedBridge.log("$tag: ${m?.name} -> manually triggered buzz effect")
+                        } else {
+                            vibrator.vibrate(80L)
+                            XposedBridge.log("$tag: ${m?.name} -> manually triggered fallback vibration")
+                        }
                     }
                 }
-                param.result = effect
+
+                // b. 阻斷原方法，防止 NoSuchMethodError
+                // b0 和 i0 都是 void 方法，設置 null 即可跳過原方法體
+                param.result = null 
             }
         }
 
-        var ok = 0
-        for (m in b0Methods) {
-            try {
-                XposedBridge.hookMethod(m, hook)
-                ok++
-            } catch (t: Throwable) {
-                XposedBridge.log("$tag: hookMethod FAILED for $m: $t")
+        for (methodName in targetMethodNames) {
+            val methods = cls.declaredMethods.filter { it.name == methodName }
+            if (methods.isNotEmpty()) {
+                for (m in methods) {
+                    try {
+                        XposedBridge.hookMethod(m, hook)
+                        XposedBridge.log("$tag: hooked -> ${m.toGenericString()}")
+                        totalHooked++
+                    } catch (t: Throwable) {
+                        XposedBridge.log("$tag: hookMethod FAILED for $m: $t")
+                    }
+                }
             }
         }
-        XposedBridge.log("$tag: ====== LAYER3 DONE, hooked=$ok ======")
+        
+        XposedBridge.log("$tag: ====== LAYER3 DONE, total hooked=$totalHooked ======")
     }
 
+    /** 檢查系統是否真的存在 semCreateWaveform(IIF) */
     private fun systemHasSemCreateWaveform(): Boolean {
         return try {
             VibrationEffect::class.java.getDeclaredMethod(
@@ -274,87 +328,34 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                 Float::class.javaPrimitiveType
             )
             true
+        } catch (_: NoSuchMethodException) {
+            false
         } catch (_: Throwable) {
             false
         }
     }
 
     /**
-     * 按 UI9 semCreateHaptic(IIF) 的逻辑, 用反射重建:
-     *   SemHapticSegment(hapticId, scale) -> list -> Composed(list, repeatIndex) -> validate
-     * 任何一步失败返回 null, 交给上层回退。
-     */
-    private fun buildSemWaveform(hapticId: Int, repeatIndex: Int, scale: Float): VibrationEffect? {
-        val tag = "HeheJuice"
-        return try {
-            val cl = VibrationEffect::class.java.classLoader
-
-            // 1) SemHapticSegment
-            val segmentCls = Class.forName("android.os.vibrator.SemHapticSegment", false, cl)
-
-            // 夹紧 scale 到 [0,1], 与 UI9 行为一致
-            val safeScale = when {
-                scale.isNaN() -> 1.0f
-                scale < 0f -> 0f
-                scale > 1f -> 1.0f
-                else -> scale
-            }
-
-            // 优先 (I, F) 构造; 不存在则退化 (I)
-            val segment = try {
-                val ctor = segmentCls.getDeclaredConstructor(Int::class.javaPrimitiveType, Float::class.javaPrimitiveType)
-                ctor.isAccessible = true
-                ctor.newInstance(hapticId, safeScale)
-            } catch (_: NoSuchMethodException) {
-                val ctor = segmentCls.getDeclaredConstructor(Int::class.javaPrimitiveType)
-                ctor.isAccessible = true
-                ctor.newInstance(hapticId)
-            } catch (_: Throwable) {
-                null
-            } ?: return null
-
-            // 2) Composed(list, repeatIndex)
-            val composedCls = Class.forName("android.os.VibrationEffect\$Composed", false, cl)
-            val composedCtor = composedCls.getDeclaredConstructor(java.util.List::class.java, Int::class.javaPrimitiveType)
-            composedCtor.isAccessible = true
-
-            val list: MutableList<Any> = ArrayList()
-            list.add(segment)
-            val effect = composedCtor.newInstance(list, repeatIndex) as? VibrationEffect ?: return null
-
-            // 3) validate()，与 UI9 一致
-            try {
-                val validate = VibrationEffect::class.java.getDeclaredMethod("validate")
-                validate.isAccessible = true
-                validate.invoke(effect)
-            } catch (_: Throwable) {
-                // validate 失败视作无效
-                XposedBridge.log("$tag: SEM effect validate failed, discard")
-                return null
-            }
-
-            effect
-        } catch (t: Throwable) {
-            XposedBridge.log("$tag: buildSemWaveform failed: $t")
-            null
-        }
-    }
-
-    /**
-     * 最后兜底: 蜂鸣波形, 仅在 SemHapticSegment 不可用时使用。
-     * 5 x (18ms 振 + 12ms 停), 振幅 220。
+     * 構造一段"滋滋"蜂鳴式振動效果。
+     * 用多段短脈衝 + 短間隔交替，產生類似馬達/蜂鳴的連續感。
+     * timings 與 amplitudes 一一對應：
+     *   amplitude = 0 表示該段靜止，> 0 表示該段振動。
      */
     private fun createBuzzVibrationEffect(): VibrationEffect? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
-        return try {
+
+        // 主方案：蜂鳴波形 (5 段 18ms 振動 + 12ms 間隔 ≈ 138ms)
+        try {
             val timings = longArrayOf(0L, 18, 12, 18, 12, 18, 12, 18, 12, 18)
             val amplitudes = intArrayOf(0, 220, 0, 220, 0, 220, 0, 220, 0, 220)
-            VibrationEffect.createWaveform(timings, amplitudes, -1)
+            return VibrationEffect.createWaveform(timings, amplitudes, -1)
         } catch (_: Throwable) {
+            // 回退：一次較明顯的單脈衝
             try {
-                VibrationEffect.createOneShot(80L, 200)
+                return VibrationEffect.createOneShot(80L, 200)
             } catch (_: Throwable) {
-                try {
+                // 最後回退：輕微點擊
+                return try {
                     VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
                 } catch (_: Throwable) {
                     null
