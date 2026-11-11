@@ -9,8 +9,8 @@
 - The module provides system version spoofing and crash interception.
 
 ## ⚠️ How it works (Hooks)
-**This module works entirely via runtime Hooks, requiring NO APK edit.** 
-Requires **LSPosed 2.0.0+**.
+- **This module works entirely via runtime Hooks, requiring NO APK edit.** 
+- Requires **LSPosed 2.0.0+**.
 
 ## Problem
 
