@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.HeheJuice.MemeryPatch"
-        minSdk = 36
+        minSdk = 35
         targetSdk = 36
         versionCode = 10
         versionName = "V.1.0"
