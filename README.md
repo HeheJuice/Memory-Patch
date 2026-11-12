@@ -6,7 +6,7 @@
 
 - 修復三星 Memory (`com.samsung.android.app.memory`) 中打開 `Memory Double Tap` 時的崩潰問題。
 - 本應用原本是針對 One UI 7+ 設計的，但在特定條件下觸發了對 One UI 9 新增 API 的調用，導致崩潰。
-- 模塊提供系統版本偽裝和崩潰攔截。
+- 模塊提供系統版本偽裝、**DexKit 防混淆動態崩潰攔截**，以及**震動反饋還原**。
 
 ## 運作方式 (Hooks)
 - **本模塊完全透過運行時 Hook 運作，無需修改或重新編譯任何 APK 檔案。** 
@@ -14,14 +14,14 @@
 
 ## 問題 (Problem)
 
-當選中 `Memory` 時雙擊 `電源鍵`，`Memory應用`會在 `ScreenCaptureViewerActivity.b0()` 中觸發對私有靜態方法 `VibrationEffect.semCreateWaveform(IIF)` 的調用。然而，該方法實際上是 **One UI 9 才新增**的 API。
+當選中 `Memory` 時雙擊 `電源鍵`，`Memory應用`會觸發對私有靜態方法 `VibrationEffect.semCreateWaveform(IIF)` 的調用。然而，該方法實際上是 **One UI 9 才新增**的 API。
 
-在未包含此新增 API 的系統（如 One UI 7~8）上，這會導致應用拋出 `NoSuchMethodError` 並直接閃退：
+在未包含此新增 API 的系統（如 One UI 7~8）上，這會導致應用拋出 `NoSuchMethodError` 並直接閃退。**此外，三星在後續 App 更新中會透過 R8 混淆改變方法名（例如從 `b0` 變為 `i0`），導致傳統硬編碼 Hook 失效。**
 
 ```java
 java.lang.NoSuchMethodError: No static method semCreateWaveform(IIF)Landroid/os/VibrationEffect; in class Landroid/os/VibrationEffect;
-	at com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity.b0(...)
-	at com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity.i0(...)
+	at com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity.b0(...) // 舊版
+	at com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity.i0(...) // 新版 v1.0.00.48
 	at com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity.onCreate(...)
 ```
 
@@ -31,17 +31,21 @@ java.lang.NoSuchMethodError: No static method semCreateWaveform(IIF)Landroid/os/
 
 1. **系統偽裝** — 偽裝 One UI 版本為 `9.5` (90500) 及 `SEM_INT`，並攔截 `File` 與 `FileInputStream`，模擬 `/system/etc/permissions/com.samsung.android.oneui.version.xml` 的存在，防止應用因版本檢查而拒絕運行。
 
-2. **崩潰攔截** — Hook `ScreenCaptureViewerActivity.b0()` 方法。由於 `b0` 是 `void` 返回類型，我們在執行前攔截並直接跳過原方法（設為 `param.result = null`），徹底避免因調用不存在的 One UI 9 API 而導致的 `NoSuchMethodError` 崩潰。
+2. **DexKit 動態崩潰攔截** — 為了應對三星的混淆更新，模塊使用 DexKit 在運行時動態掃描 APK。透過特徵（返回類型 `void`、參數數量 `3`）精準定位觸發崩潰的方法（無論它叫 `b0` 還是 `i0`），並將解析結果基於 APK 修改時間緩存，後續啟動秒開。攔截後直接跳過原方法（設為 `param.result = null`），徹底避免 `NoSuchMethodError`。
+
+3. **震動反饋還原** — 由於原方法被跳過，震動反饋會丟失。模塊在 Hook 中主動獲取系統 `Vibrator` 服務，並注入一段由公開 API `VibrationEffect.createWaveform` 構造的「滋滋」波形，完美還原原有的觸覺反饋。
 
 ```kotlin
 // 核心 Hook 邏輯示意
 val hook = object : XC_MethodHook() {
     override fun beforeHookedMethod(param: MethodHookParam) {
+        // 1. 主動觸發震動 (還原反饋)
         val context = param.thisObject as? android.content.Context
         context?.getSystemService(android.content.Context.VIBRATOR_SERVICE)?.let { vibrator ->
             (vibrator as? android.os.Vibrator)?.vibrate(buzzEffect)
         }
-        param.result = null // 跳過崩潰的原方法
+        // 2. 跳過崩潰的原方法
+        param.result = null 
     }
 }
 ```
