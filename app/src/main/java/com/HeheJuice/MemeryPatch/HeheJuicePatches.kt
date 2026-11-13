@@ -200,7 +200,7 @@ class HeheJuicePatches : IXposedHookLoadPackage {
 
         val targetClass = "com.samsung.android.app.memory.feature.capture.ScreenCaptureViewerActivity"
         
-        // 修复: 使用 APK 文件最后修改时间作为缓存 Key，无需 versionCode
+        // 使用 APK 文件最后修改时间作为缓存 Key，无需 versionCode
         val apkFile = File(lpparam.appInfo?.sourceDir ?: "")
         val cacheKey = "ScreenCaptureViewerActivity_Method_${apkFile.lastModified()}"
         
@@ -214,7 +214,7 @@ class HeheJuicePatches : IXposedHookLoadPackage {
                     context?.getSystemService(Context.VIBRATOR_SERVICE)?.let { vibrator ->
                         if (vibrator is Vibrator) {
                             vibrator.vibrate(createBuzzVibrationEffect())
-                            XposedBridge.log("$tag: ${targetMethod.name} -> manually triggered vibration")
+                            XposedBridge.log("$tag: ${targetMethod.name} -> manually triggered strong vibration")
                         }
                     }
                     param.result = null
@@ -339,17 +339,24 @@ class HeheJuicePatches : IXposedHookLoadPackage {
         } catch (_: Throwable) { false }
     }
 
+    /**
+     * 調強後的震動效果：
+     * 振幅拉滿至 255，單次振動 25ms，間隔 10ms，連續 7 次。
+     */
     private fun createBuzzVibrationEffect(): VibrationEffect? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
         return try {
-            val timings = longArrayOf(0L, 18, 12, 18, 12, 18, 12, 18, 12, 18)
-            val amplitudes = intArrayOf(0, 220, 0, 220, 0, 220, 0, 220, 0, 220)
+            // 震動時長與靜止時長交錯 (25ms 振, 10ms 停)
+            val timings = longArrayOf(0L, 25, 10, 25, 10, 25, 10, 25, 10, 25, 10, 25, 10, 25)
+            // 振幅拉滿 (255)
+            val amplitudes = intArrayOf(0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255)
             VibrationEffect.createWaveform(timings, amplitudes, -1)
         } catch (_: Throwable) {
             try {
-                VibrationEffect.createOneShot(80L, 200)
+                // Fallback: 持續 120ms，振幅 255 的單次強烈震動
+                VibrationEffect.createOneShot(120L, 255)
             } catch (_: Throwable) {
-                try { VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK) } catch (_: Throwable) { null }
+                try { VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK) } catch (_: Throwable) { null }
             }
         }
     }
